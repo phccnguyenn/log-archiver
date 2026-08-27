@@ -1,3 +1,0 @@
-[console_scripts]
-log-archiver = app.main:main
-log-inspect = app.inspect_cli:main

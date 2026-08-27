@@ -1,0 +1,16 @@
+# Virtual environments and secrets
+.venv/
+.env
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+
+# Test cache
+.pytest_cache/
+
+# Package metadata
+*.egg-info/
+
+# Git
+.git/
