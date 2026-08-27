@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+app/__init__.py
+app/archive.py
+app/config.py
+app/inspect_cli.py
+app/main.py
+app/storage_store.py
+log_archiver.egg-info/PKG-INFO
+log_archiver.egg-info/SOURCES.txt
+log_archiver.egg-info/dependency_links.txt
+log_archiver.egg-info/entry_points.txt
+log_archiver.egg-info/requires.txt
+log_archiver.egg-info/top_level.txt
+tests/test_archive.py
+tests/test_inspect_cli.py

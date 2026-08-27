@@ -1,0 +1,24 @@
+[project]
+name = "log-archiver"
+version = "0.1.0"
+description = "Archive closed APISIX access-log files to configurable object storage"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+log-archiver = "app.main:main"
+log-inspect = "app.inspect_cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

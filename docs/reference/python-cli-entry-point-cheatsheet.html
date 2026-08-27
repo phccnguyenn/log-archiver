@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Python CLI Entry Points Cheat Sheet</title><link rel="stylesheet" href="../assets/lesson.css"></head>
+<body><main class="wrap"><h1>Python CLI entry points</h1>
+<p class="muted">Quick reference for the log-archiver project.</p>
+<pre><code>[project.scripts]
+log-archiver = "app.main:main"
+log-inspect = "app.inspect_cli:main"</code></pre>
+<table><thead><tr><th>Action</th><th>Command</th></tr></thead><tbody>
+<tr><td>Install source in current venv</td><td><code>python -m pip install -e .</code></td></tr>
+<tr><td>Show command help</td><td><code>log-archiver --help</code></td></tr>
+<tr><td>Run one mode</td><td><code>log-archiver --once</code></td></tr>
+<tr><td>Check executable location</td><td><code>which log-archiver</code></td></tr>
+</tbody></table>
+<p><strong>Rule:</strong> the left side is the terminal name; the right side is <code>module:function</code>.</p>
+</main></body></html>

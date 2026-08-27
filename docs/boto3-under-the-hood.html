@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boto3 Under the Hood — Log Archiver</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #5d6b82;
+      --paper: #f7f9fc;
+      --card: #ffffff;
+      --line: #d9e1ee;
+      --blue: #2563eb;
+      --blue-soft: #eaf1ff;
+      --green: #087f5b;
+      --green-soft: #e6f7f0;
+      --orange: #b45309;
+      --orange-soft: #fff4df;
+      --purple: #6d28d9;
+      --purple-soft: #f1eaff;
+      --red: #b42318;
+      --red-soft: #fff0ee;
+      --shadow: 0 12px 32px rgba(23, 32, 51, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap { width: min(1120px, calc(100% - 32px)); margin: auto; }
+    header {
+      padding: 64px 0 48px;
+      background: linear-gradient(135deg, #10234d, #244eb8 58%, #3d82e8);
+      color: white;
+    }
+    header .eyebrow { color: #bcd4ff; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; font-size: .78rem; }
+    h1 { font-size: clamp(2rem, 5vw, 4rem); line-height: 1.05; margin: 14px 0 18px; max-width: 850px; }
+    header p { max-width: 760px; color: #e5edff; font-size: 1.1rem; margin: 0; }
+    main { padding: 34px 0 72px; }
+    section { margin: 32px 0; }
+    h2 { font-size: clamp(1.45rem, 3vw, 2.15rem); line-height: 1.2; margin: 0 0 12px; }
+    h3 { margin: 0 0 8px; line-height: 1.25; }
+    p { margin: 8px 0 14px; }
+    .lead { color: var(--muted); font-size: 1.08rem; max-width: 830px; }
+    .answer, .card, .diagram, .callout, details {
+      background: var(--card); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow);
+    }
+    .answer { padding: 24px 28px; border-left: 6px solid var(--blue); }
+    .answer strong { color: var(--blue); }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .card { padding: 22px; }
+    .diagram { padding: 18px; overflow-x: auto; }
+    .diagram svg { display: block; min-width: 720px; width: 100%; height: auto; }
+    .caption { color: var(--muted); font-size: .92rem; margin: 10px 4px 0; }
+    .callout { padding: 18px 22px; box-shadow: none; }
+    .callout.blue { background: var(--blue-soft); border-color: #b9d0ff; }
+    .callout.green { background: var(--green-soft); border-color: #addfca; }
+    .callout.orange { background: var(--orange-soft); border-color: #f3cc83; }
+    .callout.red { background: var(--red-soft); border-color: #f1b8b1; }
+    .tag { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: .78rem; font-weight: 700; margin-right: 5px; }
+    .tag.confirmed { color: var(--green); background: var(--green-soft); }
+    .tag.unknown { color: var(--orange); background: var(--orange-soft); }
+    .tag.risk { color: var(--red); background: var(--red-soft); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; background: #eef2f8; padding: 2px 5px; border-radius: 5px; }
+    pre { background: #101827; color: #e5edff; border-radius: 12px; padding: 16px 18px; overflow-x: auto; line-height: 1.5; }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+    th, td { text-align: left; vertical-align: top; padding: 13px 15px; border-bottom: 1px solid var(--line); }
+    th { background: #eef3fa; font-size: .9rem; }
+    tr:last-child td { border-bottom: 0; }
+    details { padding: 15px 18px; box-shadow: none; margin: 10px 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    ul { padding-left: 22px; }
+    .footer { color: var(--muted); border-top: 1px solid var(--line); padding-top: 22px; font-size: .9rem; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { padding-top: 42px; } .answer, .card { padding: 18px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="eyebrow">ELI5 deep · issue understanding</div>
+      <h1>What boto3 does when a log file travels to MinIO</h1>
+      <p>A visual explanation of the Python application, boto3, the S3-compatible API, MinIO, and what changes when boto3 is not used.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="answer">
+      <h2>The one-sentence answer</h2>
+      <p><strong>Python decides what to archive. Boto3 turns that decision into authenticated S3-compatible network requests. MinIO receives those requests and stores the object.</strong></p>
+      <p>Without boto3, the file does not magically reach MinIO. We must replace boto3 with another uploader, such as the MinIO CLI, AWS CLI, another SDK, or our own HTTP implementation.</p>
+    </section>
+
+    <section>
+      <h2>1. First, separate the four names</h2>
+      <p class="lead">Most of the confusion comes from treating the storage product, the protocol, and the client library as one thing.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 1060 330" role="img" aria-label="Python application uses boto3 to speak the S3 API to MinIO or AWS S3">
+          <defs>
+            <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker>
+            <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#087f5b"/></marker>
+          </defs>
+          <rect x="25" y="80" width="210" height="120" rx="18" fill="#eaf1ff" stroke="#2563eb" stroke-width="2"/>
+          <text x="130" y="117" text-anchor="middle" font-weight="700" font-size="22" fill="#172033">Python app</text>
+          <text x="130" y="150" text-anchor="middle" font-size="16" fill="#5d6b82">decides what to do</text>
+          <text x="130" y="175" text-anchor="middle" font-size="15" fill="#5d6b82">scan · policy · retry</text>
+          <path d="M235 140 H390" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-blue)"/>
+          <rect x="390" y="80" width="210" height="120" rx="18" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/>
+          <text x="495" y="117" text-anchor="middle" font-weight="700" font-size="22" fill="#172033">boto3</text>
+          <text x="495" y="150" text-anchor="middle" font-size="16" fill="#5d6b82">Python SDK / toolkit</text>
+          <text x="495" y="175" text-anchor="middle" font-size="15" fill="#5d6b82">sign · send · parse</text>
+          <path d="M600 140 H755" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-blue)"/>
+          <rect x="755" y="80" width="280" height="120" rx="18" fill="#e6f7f0" stroke="#087f5b" stroke-width="2"/>
+          <text x="895" y="112" text-anchor="middle" font-weight="700" font-size="21" fill="#172033">S3-compatible API</text>
+          <text x="895" y="145" text-anchor="middle" font-size="16" fill="#5d6b82">common HTTP contract</text>
+          <text x="895" y="174" text-anchor="middle" font-size="15" fill="#5d6b82">implemented by MinIO and AWS S3</text>
+          <path d="M895 200 V255" stroke="#087f5b" stroke-width="4" marker-end="url(#arrow-green)"/>
+          <text x="895" y="282" text-anchor="middle" font-weight="700" font-size="19" fill="#087f5b">MinIO or AWS S3</text>
+        </svg>
+        <p class="caption">The word <code>s3</code> in <code>boto3.client("s3")</code> identifies the API language. <code>endpoint_url</code> identifies the actual server.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>2. The archive flow in this project</h2>
+      <p class="lead">The real-time Kafka path and the long-term archive path share the source log, but they have different jobs.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 1080 430" role="img" aria-label="APISIX writes access log, Fluent Bit sends real-time events to Kafka and a rotator plus Python boto3 sends closed files to MinIO">
+          <defs>
+            <marker id="arrow-dark" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#172033"/></marker>
+            <marker id="arrow-purple" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#6d28d9"/></marker>
+            <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#b45309"/></marker>
+          </defs>
+          <rect x="30" y="140" width="150" height="80" rx="15" fill="#fff4df" stroke="#b45309" stroke-width="2"/>
+          <text x="105" y="175" text-anchor="middle" font-weight="700" font-size="20">APISIX</text><text x="105" y="200" text-anchor="middle" font-size="14">writes continuously</text>
+          <path d="M180 180 H310" stroke="#b45309" stroke-width="4" marker-end="url(#arrow-orange)"/>
+          <rect x="310" y="140" width="190" height="80" rx="15" fill="#fff4df" stroke="#b45309" stroke-width="2"/>
+          <text x="405" y="175" text-anchor="middle" font-weight="700" font-size="19">access.log</text><text x="405" y="200" text-anchor="middle" font-size="14">active file</text>
+          <path d="M500 165 H665" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-dark)"/>
+          <rect x="665" y="85" width="175" height="70" rx="15" fill="#eaf1ff" stroke="#2563eb" stroke-width="2"/>
+          <text x="752" y="117" text-anchor="middle" font-weight="700" font-size="18">Fluent Bit</text><text x="752" y="140" text-anchor="middle" font-size="14">tails records</text>
+          <path d="M840 120 H990" stroke="#6d28d9" stroke-width="4" marker-end="url(#arrow-purple)"/>
+          <rect x="880" y="30" width="150" height="60" rx="15" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/>
+          <text x="955" y="66" text-anchor="middle" font-weight="700" font-size="18">Kafka</text>
+          <path d="M405 220 V315" stroke="#b45309" stroke-width="4" marker-end="url(#arrow-orange)"/>
+          <rect x="300" y="315" width="210" height="72" rx="15" fill="#fff4df" stroke="#b45309" stroke-width="2"/>
+          <text x="405" y="348" text-anchor="middle" font-weight="700" font-size="18">Rotator</text><text x="405" y="372" text-anchor="middle" font-size="14">rename + reopen</text>
+          <path d="M510 351 H665" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow-dark)"/>
+          <rect x="665" y="315" width="175" height="72" rx="15" fill="#eaf1ff" stroke="#2563eb" stroke-width="2"/>
+          <text x="752" y="348" text-anchor="middle" font-weight="700" font-size="18">Python</text><text x="752" y="372" text-anchor="middle" font-size="14">log-archiver</text>
+          <path d="M840 351 H990" stroke="#6d28d9" stroke-width="4" marker-end="url(#arrow-purple)"/>
+          <rect x="880" y="315" width="150" height="72" rx="15" fill="#e6f7f0" stroke="#087f5b" stroke-width="2"/>
+          <text x="955" y="348" text-anchor="middle" font-weight="700" font-size="18">MinIO</text><text x="955" y="372" text-anchor="middle" font-size="14">archive object</text>
+          <text x="600" y="247" text-anchor="middle" font-size="15" fill="#5d6b82">two consumers, two purposes</text>
+        </svg>
+        <p class="caption">Fluent Bit should not be confused with the archiver. Fluent Bit streams records to Kafka; the archiver preserves completed files in MinIO.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>3. What happens inside boto3?</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1080 580" role="img" aria-label="Sequence diagram showing Python calling boto3, credential lookup, request signing, HTTP upload to MinIO and response">
+          <defs>
+            <marker id="arrow-seq" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker>
+            <marker id="arrow-return" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#087f5b"/></marker>
+          </defs>
+          <text x="145" y="30" text-anchor="middle" font-weight="700" font-size="19">Python app</text>
+          <text x="400" y="30" text-anchor="middle" font-weight="700" font-size="19">boto3 / botocore</text>
+          <text x="680" y="30" text-anchor="middle" font-weight="700" font-size="19">HTTP network</text>
+          <text x="940" y="30" text-anchor="middle" font-weight="700" font-size="19">MinIO</text>
+          <path d="M145 48 V540 M400 48 V540 M680 48 V540 M940 48 V540" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="6 7"/>
+          <path d="M145 95 H400" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-seq)"/><text x="272" y="84" text-anchor="middle" font-size="14">upload_file(path, bucket, key)</text>
+          <path d="M400 155 H145" stroke="#087f5b" stroke-width="3" marker-end="url(#arrow-return)"/><text x="272" y="145" text-anchor="middle" font-size="14">load credentials</text>
+          <path d="M400 215 H400" stroke="#6d28d9" stroke-width="3" marker-end="url(#arrow-seq)"/><text x="425" y="208" font-size="14">choose endpoint + API model</text>
+          <path d="M400 275 H680" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-seq)"/><text x="540" y="264" text-anchor="middle" font-size="14">build + sign PUT request</text>
+          <path d="M680 345 H940" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-seq)"/><text x="810" y="334" text-anchor="middle" font-size="14">HTTP bytes + file body</text>
+          <path d="M940 410 H680" stroke="#087f5b" stroke-width="3" marker-end="url(#arrow-return)"/><text x="810" y="400" text-anchor="middle" font-size="14">200 OK or error</text>
+          <path d="M680 470 H400" stroke="#087f5b" stroke-width="3" marker-end="url(#arrow-return)"/><text x="540" y="460" text-anchor="middle" font-size="14">parse response / raise exception</text>
+          <path d="M400 525 H145" stroke="#087f5b" stroke-width="3" marker-end="url(#arrow-return)"/><text x="272" y="515" text-anchor="middle" font-size="14">success or retry decision</text>
+        </svg>
+        <p class="caption">The visible Python call is small because boto3 hides credential lookup, signing, HTTP transport, response parsing, and much of the retry behavior.</p>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Credentials are not storage</h2>
+        <p>Credentials are only proof of identity. They do not contain the file and they do not tell MinIO where to store it.</p>
+        <div class="diagram">
+          <svg viewBox="0 0 500 240" role="img" aria-label="Credentials are used to sign a request, not to store the file">
+            <defs><marker id="arrow-credentials" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker></defs>
+            <rect x="25" y="80" width="125" height="65" rx="12" fill="#fff4df" stroke="#b45309" stroke-width="2"/><text x="87" y="108" text-anchor="middle" font-weight="700">Credentials</text><text x="87" y="130" text-anchor="middle" font-size="13">access + secret</text>
+            <path d="M150 112 H245" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-credentials)"/>
+            <rect x="245" y="80" width="125" height="65" rx="12" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/><text x="307" y="108" text-anchor="middle" font-weight="700">Signature</text><text x="307" y="130" text-anchor="middle" font-size="13">request proof</text>
+            <path d="M370 112 H465" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-credentials)"/>
+            <text x="250" y="190" text-anchor="middle" font-size="15" fill="#5d6b82">The file is sent separately as request data.</text>
+          </svg>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Bucket and object</h2>
+        <p>A bucket is a named storage container. An object is the file data plus metadata, identified by its object key.</p>
+        <pre><code>bucket: traffic-log-archive
+key:    apisix/access-logs/access.log.2026-08-24
+data:   the log file bytes</code></pre>
+        <p>The key looks like a folder path, but it is really an object name with slash characters.</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>4. What changes when boto3 is removed?</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1060 430" role="img" aria-label="Comparison of boto3, CLI, another SDK, and manual HTTP approaches">
+          <defs><marker id="arrow-choice" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker></defs>
+          <rect x="30" y="160" width="180" height="78" rx="15" fill="#eaf1ff" stroke="#2563eb" stroke-width="2"/><text x="120" y="194" text-anchor="middle" font-weight="700" font-size="18">Python archiver</text><text x="120" y="218" text-anchor="middle" font-size="14">policy + file selection</text>
+          <path d="M210 199 H310" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-choice)"/>
+          <rect x="310" y="30" width="190" height="62" rx="13" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/><text x="405" y="68" text-anchor="middle" font-weight="700">boto3 SDK</text>
+          <rect x="310" y="115" width="190" height="62" rx="13" fill="#fff4df" stroke="#b45309" stroke-width="2"/><text x="405" y="153" text-anchor="middle" font-weight="700">MinIO / AWS CLI</text>
+          <rect x="310" y="200" width="190" height="62" rx="13" fill="#e6f7f0" stroke="#087f5b" stroke-width="2"/><text x="405" y="238" text-anchor="middle" font-weight="700">Another SDK</text>
+          <rect x="310" y="285" width="190" height="62" rx="13" fill="#fff0ee" stroke="#b42318" stroke-width="2"/><text x="405" y="323" text-anchor="middle" font-weight="700">Manual HTTP</text>
+          <path d="M500 61 H680 M500 146 H680 M500 231 H680 M500 316 H680" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-choice)"/>
+          <rect x="680" y="160" width="180" height="78" rx="15" fill="#e6f7f0" stroke="#087f5b" stroke-width="2"/><text x="770" y="194" text-anchor="middle" font-weight="700" font-size="18">S3-compatible API</text><text x="770" y="218" text-anchor="middle" font-size="14">authenticated HTTP</text>
+          <path d="M860 199 H1015" stroke="#087f5b" stroke-width="3" marker-end="url(#arrow-choice)"/><text x="940" y="185" text-anchor="middle" font-size="13">endpoint_url</text>
+          <text x="1015" y="230" text-anchor="middle" font-weight="700" font-size="18">MinIO</text>
+        </svg>
+        <p class="caption">Removing boto3 does not remove the need for an S3 client. It only changes which tool performs the protocol work.</p>
+      </div>
+      <table>
+        <thead><tr><th>Replacement</th><th>What happens</th><th>Main tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td><strong>MinIO CLI</strong></td><td>Python or a shell process invokes <code>mc cp</code>.</td><td>Simple, but application logic must handle command exit codes and output.</td></tr>
+          <tr><td><strong>AWS CLI</strong></td><td>A separate CLI sends S3-compatible requests.</td><td>Useful operationally, but less natural for a long-running Python worker.</td></tr>
+          <tr><td><strong>Another SDK</strong></td><td>Another language/library speaks the same API.</td><td>Valid choice; the application still needs archive policy.</td></tr>
+          <tr><td><strong>Manual HTTP</strong></td><td>Our code creates and signs every request itself.</td><td>High risk: signing, multipart upload, retries, and errors become our responsibility.</td></tr>
+          <tr><td><strong>No uploader</strong></td><td>Files remain on the Docker volume.</td><td>Storage grows until retention or disk pressure causes failure.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>5. Python versus boto3: the responsibility boundary</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1060 380" role="img" aria-label="Responsibility boundary between Python archive policy and boto3 transport">
+          <rect x="35" y="50" width="455" height="275" rx="20" fill="#eaf1ff" stroke="#2563eb" stroke-width="2"/>
+          <rect x="570" y="50" width="455" height="275" rx="20" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/>
+          <text x="262" y="92" text-anchor="middle" font-size="24" font-weight="700">Python application</text>
+          <text x="797" y="92" text-anchor="middle" font-size="24" font-weight="700">boto3</text>
+          <text x="65" y="135" font-size="17">✓ scan access.log.*</text><text x="65" y="170" font-size="17">✓ wait for file stability</text><text x="65" y="205" font-size="17">✓ choose object key</text><text x="65" y="240" font-size="17">✓ decide retry / retain</text><text x="65" y="275" font-size="17">✓ run the log-archiver CLI</text>
+          <text x="600" y="135" font-size="17">✓ load and use S3 API model</text><text x="600" y="170" font-size="17">✓ resolve credentials</text><text x="600" y="205" font-size="17">✓ sign requests</text><text x="600" y="240" font-size="17">✓ transfer file bytes</text><text x="600" y="275" font-size="17">✓ parse responses / retry transport</text>
+        </svg>
+      </div>
+    </section>
+
+    <section>
+      <h2>6. Failure paths: why the local file should remain</h2>
+      <div class="diagram">
+        <svg viewBox="0 0 1060 360" role="img" aria-label="Successful upload and failed upload paths">
+          <defs><marker id="arrow-fail" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#b42318"/></marker><marker id="arrow-ok" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#087f5b"/></marker></defs>
+          <rect x="35" y="140" width="175" height="70" rx="14" fill="#fff4df" stroke="#b45309" stroke-width="2"/><text x="122" y="181" text-anchor="middle" font-weight="700">Closed local file</text>
+          <path d="M210 175 H350" stroke="#172033" stroke-width="3" marker-end="url(#arrow-ok)"/>
+          <rect x="350" y="140" width="175" height="70" rx="14" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/><text x="437" y="181" text-anchor="middle" font-weight="700">boto3 upload</text>
+          <path d="M525 160 H665" stroke="#087f5b" stroke-width="3" marker-end="url(#arrow-ok)"/><text x="595" y="148" text-anchor="middle" font-size="14" fill="#087f5b">success</text>
+          <rect x="665" y="125" width="175" height="70" rx="14" fill="#e6f7f0" stroke="#087f5b" stroke-width="2"/><text x="752" y="166" text-anchor="middle" font-weight="700">Object in MinIO</text>
+          <path d="M525 195 C560 275, 700 280, 840 260" fill="none" stroke="#b42318" stroke-width="3" marker-end="url(#arrow-fail)"/><text x="650" y="300" text-anchor="middle" font-size="14" fill="#b42318">timeout / permission / MinIO unavailable</text>
+          <rect x="840" y="225" width="175" height="70" rx="14" fill="#fff0ee" stroke="#b42318" stroke-width="2"/><text x="927" y="266" text-anchor="middle" font-weight="700">Keep local file</text>
+        </svg>
+      </div>
+      <div class="callout green"><strong>Safety rule:</strong> a failed upload should not delete the local archive. The next polling cycle can retry it.</div>
+    </section>
+
+    <section>
+      <h2>7. Issue understanding</h2>
+      <div class="grid">
+        <div class="card"><h3>Expected understanding</h3><p>Boto3 is a Python SDK for making S3 API calls. It can target AWS S3 or MinIO, depending on the endpoint configuration.</p></div>
+        <div class="card"><h3>Actual confusion</h3><p>The name “boto3” sounds AWS-specific, so it is easy to assume it cannot work with MinIO.</p></div>
+        <div class="card"><h3>Divergence point</h3><p>The apparent contradiction is at <code>boto3.client("s3")</code>: <code>s3</code> is the API model, while <code>endpoint_url</code> chooses MinIO.</p></div>
+        <div class="card"><h3>Root mechanism</h3><p>MinIO implements the S3-compatible HTTP contract. Boto3 speaks that contract; it does not require the server to be owned by Amazon.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>8. Applying it to the current repository</h2>
+      <p><span class="tag confirmed">Confirmed</span> The archiver is a separate Python service. It scans stable rotated files and uses a storage adapter backed by boto3.</p>
+      <p><span class="tag confirmed">Confirmed</span> The Docker Compose configuration supplies the MinIO endpoint and credentials to the archiver.</p>
+      <p><span class="tag unknown">Still needed</span> The dedicated APISIX rotator must create completed <code>access.log.*</code> files. Until that exists, the archiver should find no eligible archive file.</p>
+      <p><span class="tag unknown">Still needed</span> Production credential management, object retention, and the policy for copying files to another long-term system remain deployment decisions.</p>
+      <details>
+        <summary>Relevant source files</summary>
+        <ul>
+          <li><a href="../app/archive.py">app/archive.py</a> — file selection, stability, and archive workflow.</li>
+          <li><a href="../app/storage_store.py">app/storage_store.py</a> — boto3-backed S3-compatible storage adapter.</li>
+          <li><a href="../app/config.py">app/config.py</a> — <code>STORAGE_*</code> settings.</li>
+          <li><a href="../app/main.py">app/main.py</a> — application entry point and CLI mode.</li>
+          <li><a href="../../traffic-management-infra/docker-compose.local.yml">Platform Docker Compose</a> — MinIO and log-archiver integration.</li>
+        </ul>
+      </details>
+    </section>
+
+    <section>
+      <h2>9. Final mental model</h2>
+      <div class="callout blue">
+        <p><strong>APISIX creates the log.</strong></p>
+        <p><strong>The rotator closes the log.</strong></p>
+        <p><strong>Python decides that the closed file is ready.</strong></p>
+        <p><strong>Boto3 performs the authenticated storage conversation.</strong></p>
+        <p><strong>MinIO stores the object.</strong></p>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 1060 180" role="img" aria-label="Final mental model from APISIX to MinIO">
+          <defs><marker id="arrow-final" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/></marker></defs>
+          <rect x="25" y="55" width="140" height="58" rx="13" fill="#fff4df" stroke="#b45309" stroke-width="2"/><text x="95" y="90" text-anchor="middle" font-weight="700">APISIX</text>
+          <path d="M165 84 H245" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-final)"/>
+          <rect x="245" y="55" width="140" height="58" rx="13" fill="#fff4df" stroke="#b45309" stroke-width="2"/><text x="315" y="90" text-anchor="middle" font-weight="700">Rotator</text>
+          <path d="M385 84 H465" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-final)"/>
+          <rect x="465" y="55" width="140" height="58" rx="13" fill="#eaf1ff" stroke="#2563eb" stroke-width="2"/><text x="535" y="90" text-anchor="middle" font-weight="700">Python</text>
+          <path d="M605 84 H685" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-final)"/>
+          <rect x="685" y="55" width="140" height="58" rx="13" fill="#f1eaff" stroke="#6d28d9" stroke-width="2"/><text x="755" y="90" text-anchor="middle" font-weight="700">boto3</text>
+          <path d="M825 84 H905" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow-final)"/>
+          <rect x="905" y="55" width="130" height="58" rx="13" fill="#e6f7f0" stroke="#087f5b" stroke-width="2"/><text x="970" y="90" text-anchor="middle" font-weight="700">MinIO</text>
+        </svg>
+      </div>
+    </section>
+
+    <p class="footer">This guide is intentionally self-contained and uses inline SVG diagrams so it can be opened without an internet connection.</p>
+  </main>
+</body>
+</html>
